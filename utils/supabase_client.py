@@ -24,10 +24,12 @@ def get_client() -> Client:
     sb = _base_client()
     session = st.session_state.get("session")
     if session:
-        try:
-            sb.auth.set_session(session.access_token, session.refresh_token)
-        except Exception:
-            pass
+        # Directly set the PostgREST Authorization header with the user's JWT.
+        # This is more reliable than auth.set_session() which does JWT validation.
+        sb.postgrest.auth(session.access_token)
+    else:
+        # Reset to anonymous key when logged out
+        sb.postgrest.auth(_SUPABASE_KEY)
     return sb
 
 

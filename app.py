@@ -71,6 +71,7 @@ if session:
     if st.sidebar.button("Sign out"):
         sign_out()
         st.session_state.session = None
+        st.session_state.pop("household", None)
         st.rerun()
 
     if "household" in st.session_state and st.session_state.household:
