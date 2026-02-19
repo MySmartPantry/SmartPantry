@@ -10,11 +10,25 @@ _SUPABASE_KEY = os.getenv("SUPABASE_ANON_KEY")
 
 
 @st.cache_resource
-def get_client() -> Client:
+def _base_client() -> Client:
+    """Returns a shared anonymous Supabase client (no JWT)."""
     if not _SUPABASE_URL or not _SUPABASE_KEY:
         st.error("Missing SUPABASE_URL or SUPABASE_ANON_KEY. Check your .env file.")
         st.stop()
     return create_client(_SUPABASE_URL, _SUPABASE_KEY)
+
+
+def get_client() -> Client:
+    """Returns the Supabase client with the current user's JWT set (if logged in).
+    This ensures RLS policies that use auth.uid() work correctly."""
+    sb = _base_client()
+    session = st.session_state.get("session")
+    if session:
+        try:
+            sb.auth.set_session(session.access_token, session.refresh_token)
+        except Exception:
+            pass
+    return sb
 
 
 def get_session():
