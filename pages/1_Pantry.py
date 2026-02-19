@@ -7,8 +7,7 @@ st.set_page_config(page_title="Pantry | SmartPantry", page_icon="📦", layout="
 # ── Auth check ────────────────────────────────────────────────
 session = get_session()
 if not session:
-    st.warning("Please sign in from the Home page.")
-    st.stop()
+    st.switch_page("app.py")
 
 # ── Household check ───────────────────────────────────────────
 if "household" not in st.session_state:

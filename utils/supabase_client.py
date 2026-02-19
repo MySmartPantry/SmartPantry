@@ -11,26 +11,45 @@ _SUPABASE_KEY = os.getenv("SUPABASE_ANON_KEY")
 
 @st.cache_resource
 def _base_client() -> Client:
-    """Returns a shared anonymous Supabase client (no JWT)."""
+    """Shared anonymous Supabase client. Never used directly — always go through get_client()."""
     if not _SUPABASE_URL or not _SUPABASE_KEY:
         st.error("Missing SUPABASE_URL or SUPABASE_ANON_KEY. Check your .env file.")
         st.stop()
     return create_client(_SUPABASE_URL, _SUPABASE_KEY)
 
 
-def get_client() -> Client:
-    """Returns the Supabase client with the current user's JWT set (if logged in).
-    This ensures RLS policies that use auth.uid() work correctly."""
+class _AuthClient:
+    """Wraps a Supabase client and injects the user's JWT into every table() call.
+
+    supabase-py 2.x does not reliably propagate auth state to PostgREST when
+    set on the shared client object. Chaining .auth(token) per request is the
+    only approach that works consistently (per supabase-py issue #272/#915).
+    """
+
+    def __init__(self, sb, token):
+        self._sb = sb
+        self._token = token
+
+    def table(self, name):
+        builder = self._sb.table(name)
+        if self._token:
+            # builder.auth is a BasicAuth field (None by default), NOT a method.
+            # Inject the user JWT directly into the builder's request headers.
+            builder.headers["Authorization"] = f"Bearer {self._token}"
+        return builder
+
+    def __getattr__(self, name):
+        # Proxy everything else (auth, storage, functions, etc.) to the real client
+        return getattr(self._sb, name)
+
+
+def get_client():
+    """Returns a Supabase client wrapper that automatically injects the current
+    user's JWT on every table() call so RLS policies work correctly."""
     sb = _base_client()
     session = st.session_state.get("session")
-    if session:
-        # Directly set the PostgREST Authorization header with the user's JWT.
-        # This is more reliable than auth.set_session() which does JWT validation.
-        sb.postgrest.auth(session.access_token)
-    else:
-        # Reset to anonymous key when logged out
-        sb.postgrest.auth(_SUPABASE_KEY)
-    return sb
+    token = session.access_token if session else None
+    return _AuthClient(sb, token)
 
 
 def get_session():
@@ -39,7 +58,7 @@ def get_session():
 
 def sign_in(email: str, password: str):
     try:
-        sb = get_client()
+        sb = _base_client()
         result = sb.auth.sign_in_with_password({"email": email, "password": password})
         return result.session
     except Exception as e:
@@ -55,15 +74,13 @@ def sign_up(email: str, password: str, household_name: str):
     Returns True on success, False on failure.
     """
     try:
-        sb = get_client()
+        sb = _base_client()
         result = sb.auth.sign_up({
             "email": email,
             "password": password,
             "options": {"data": {"pending_household_name": household_name}},
         })
-        # result.user will be set even before email confirmation
         if result.user:
-            # Store household name in session so we can create it after login
             st.session_state["pending_household_name"] = household_name
             return True
         return False
@@ -74,20 +91,49 @@ def sign_up(email: str, password: str, household_name: str):
 
 def sign_out():
     try:
-        get_client().auth.sign_out()
+        _base_client().auth.sign_out()
     except Exception:
         pass
 
 
-def _create_household(name: str, user_id: str, sb: Client):
-    result = sb.table("households").insert({"name": name}).execute()
-    if result.data:
-        hh_id = result.data[0]["id"]
-        sb.table("household_members").insert({
-            "user_id": user_id,
-            "household_id": hh_id,
-            "role": "owner",
-        }).execute()
+def _create_household(name: str, user_id: str, sb):
+    """Create a household via direct REST calls.
+
+    Uses requests instead of supabase-py to reliably send the user JWT.
+    The table requires GRANT + RLS (authenticated role), both set in migrations.
+    """
+    import requests as _req
+
+    session = st.session_state.get("session")
+    if not session:
+        st.error("Cannot create household: no active session.")
+        return
+
+    headers = {
+        "apikey": _SUPABASE_KEY,
+        "Authorization": f"Bearer {session.access_token}",
+        "Content-Type": "application/json",
+        "Prefer": "return=representation",
+    }
+
+    resp = _req.post(
+        f"{_SUPABASE_URL}/rest/v1/households",
+        json={"name": name},
+        headers=headers,
+    )
+    if not resp.ok:
+        st.error(f"Could not create household: {resp.status_code} {resp.text}")
+        return
+
+    hh_id = resp.json()[0]["id"]
+
+    resp2 = _req.post(
+        f"{_SUPABASE_URL}/rest/v1/household_members",
+        json={"user_id": user_id, "household_id": hh_id, "role": "owner"},
+        headers=headers,
+    )
+    if not resp2.ok:
+        st.error(f"Could not add household member: {resp2.status_code} {resp2.text}")
 
 
 def get_household():
