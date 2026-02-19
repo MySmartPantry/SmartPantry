@@ -32,17 +32,28 @@ def sign_in(email: str, password: str):
 
 
 def sign_up(email: str, password: str, household_name: str):
+    """
+    Creates a new account. With email confirmation enabled, Supabase sends a
+    confirmation email and result.session is None until the user confirms.
+    We store the household name temporarily so we can create it after confirmation.
+    Returns True on success, False on failure.
+    """
     try:
         sb = get_client()
-        result = sb.auth.sign_up({"email": email, "password": password})
-        session = result.session
-        if session and household_name:
-            # Create a household for this new user
-            _create_household(household_name, session.user.id, sb)
-        return session
+        result = sb.auth.sign_up({
+            "email": email,
+            "password": password,
+            "options": {"data": {"pending_household_name": household_name}},
+        })
+        # result.user will be set even before email confirmation
+        if result.user:
+            # Store household name in session so we can create it after login
+            st.session_state["pending_household_name"] = household_name
+            return True
+        return False
     except Exception as e:
         st.error(f"Sign-up failed: {e}")
-        return None
+        return False
 
 
 def sign_out():
@@ -63,7 +74,7 @@ def _create_household(name: str, user_id: str, sb: Client):
         }).execute()
 
 
-def get_household() -> dict | None:
+def get_household():
     """Returns the current user's household, or None if not in one."""
     session = get_session()
     if not session:

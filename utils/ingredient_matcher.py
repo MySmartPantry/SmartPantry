@@ -27,7 +27,7 @@ def get_all_aliases() -> dict:
     return {row["alias"].lower(): row["ingredient_type_id"] for row in result.data}
 
 
-def find_canonical_id(name: str) -> str | None:
+def find_canonical_id(name: str):
     """
     Given any ingredient name (e.g. "Goat Milk", "penne pasta", "EVOO"),
     returns the ingredient_type_id it maps to, or None if not recognized.
@@ -108,7 +108,7 @@ def check_recipe_against_pantry(recipe_id: str, household_id: str) -> dict:
     return {"have": have, "missing": missing, "match_pct": match_pct, "total": total}
 
 
-def deduct_from_pantry(recipe_id: str, household_id: str, servings: int = 1, recipe_servings: int = 4) -> list[str]:
+def deduct_from_pantry(recipe_id: str, household_id: str, servings: int = 1, recipe_servings: int = 4):
     """
     Subtracts recipe ingredient quantities from the household pantry
     proportional to the number of servings being cooked.
