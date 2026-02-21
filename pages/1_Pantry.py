@@ -1,6 +1,6 @@
 import streamlit as st
-from utils.supabase_client import get_client, get_session, get_household, join_household
-from utils.ingredient_matcher import find_canonical_id, get_all_types
+from utils.supabase_client import get_client, get_session, get_household, join_household, persist_auth
+from utils.ingredient_matcher import names_match, get_substitutions
 
 st.set_page_config(page_title="Pantry | SmartPantry", page_icon="📦", layout="wide")
 
@@ -8,6 +8,8 @@ st.set_page_config(page_title="Pantry | SmartPantry", page_icon="📦", layout="
 session = get_session()
 if not session:
     st.switch_page("app.py")
+
+persist_auth()  # Keep tokens fresh in localStorage across browser refreshes
 
 # ── Household check ───────────────────────────────────────────
 if "household" not in st.session_state:
@@ -45,78 +47,101 @@ hh_id = household["id"]
 st.title("📦 My Pantry")
 st.caption(f"Household: **{household['name']}** · Invite code: `{household['invite_code']}`")
 
+# Flash message from previous add (shown after form resets)
+if "_pantry_msg" in st.session_state:
+    msg, kind = st.session_state.pop("_pantry_msg")
+    (st.success if kind == "success" else st.info)(msg)
+
 # ── Add item form ─────────────────────────────────────────────
+if "add_item_n" not in st.session_state:
+    st.session_state.add_item_n = 0
+
 with st.expander("➕ Add an item to your pantry", expanded=False):
-    with st.form("add_item"):
+    with st.form(f"add_item_{st.session_state.add_item_n}"):
         col1, col2, col3 = st.columns([3, 1, 1])
         with col1:
             specific_name = st.text_input("Item name", placeholder="e.g. Goat Milk, Penne, EVOO")
         with col2:
             quantity = st.number_input("Qty", min_value=0.0, value=1.0, step=0.5)
         with col3:
-            unit = st.selectbox("Unit", ["count", "cups", "oz", "lbs", "tbsp", "tsp", "liters", "ml", "grams", "kg", "bunch", "clove", "slice"])
+            unit = st.text_input("Unit", value="count", placeholder="count, cups, oz, lbs…")
 
         submitted = st.form_submit_button("Add to Pantry")
 
     if submitted and specific_name:
-        type_id = find_canonical_id(specific_name)
-        if type_id:
-            # Check if a pantry item of this type already exists; update quantity instead of duplicating
-            existing = (
-                sb.table("pantry_items")
-                .select("id, quantity")
-                .eq("household_id", hh_id)
-                .eq("ingredient_type_id", type_id)
-                .limit(1)
-                .execute()
-            ).data
+        all_items = (
+            sb.table("pantry_items")
+            .select("id, specific_name, quantity")
+            .eq("household_id", hh_id)
+            .execute()
+        ).data
+        subs = get_substitutions()
+        existing = next(
+            (i for i in all_items if names_match(specific_name, i["specific_name"], subs)),
+            None,
+        )
 
-            if existing:
-                new_qty = existing[0]["quantity"] + quantity
-                sb.table("pantry_items").update({"quantity": new_qty, "specific_name": specific_name, "updated_at": "now()"}).eq("id", existing[0]["id"]).execute()
-                st.success(f"Updated **{specific_name}** — now {new_qty} {unit} on hand.")
-            else:
-                sb.table("pantry_items").insert({
-                    "household_id": hh_id,
-                    "ingredient_type_id": type_id,
-                    "specific_name": specific_name,
-                    "quantity": quantity,
-                    "unit": unit,
-                }).execute()
-                st.success(f"Added **{specific_name}** to pantry.")
+        if existing:
+            new_qty = (existing["quantity"] or 0) + quantity
+            sb.table("pantry_items").update({
+                "quantity": new_qty,
+                "specific_name": specific_name,
+            }).eq("id", existing["id"]).execute()
+            st.session_state["_pantry_msg"] = (f"Updated **{specific_name}** — now {new_qty} {unit} on hand.", "success")
         else:
-            st.warning(
-                f"**'{specific_name}'** wasn't recognized as a known ingredient. "
-                "It was added with no canonical type, so it won't match recipes automatically. "
-                "Try a simpler name (e.g. 'milk' instead of 'cold pressed A2 milk')."
-            )
             sb.table("pantry_items").insert({
                 "household_id": hh_id,
-                "ingredient_type_id": None,
                 "specific_name": specific_name,
                 "quantity": quantity,
                 "unit": unit,
             }).execute()
+            st.session_state["_pantry_msg"] = (f"Added **{specific_name}** to pantry.", "success")
+
+        st.session_state.add_item_n += 1
         st.rerun()
 
 st.markdown("---")
 
-# ── Alias manager ─────────────────────────────────────────────
-with st.expander("🔗 Add a custom substitution (e.g. 'A2 Milk' = Milk)", expanded=False):
-    all_types = get_all_types()
-    type_options = sorted(all_types.keys())
-    with st.form("add_alias"):
-        alias_name = st.text_input("Your specific ingredient name", placeholder="e.g. A2 Milk")
-        canonical = st.selectbox("It counts as...", type_options)
-        if st.form_submit_button("Save substitution"):
-            if alias_name and canonical:
-                type_id = all_types[canonical]["id"]
+# ── Substitution pair manager ─────────────────────────────────
+if "add_sub_n" not in st.session_state:
+    st.session_state.add_sub_n = 0
+
+with st.expander("🔄 Substitutions — treat these ingredients as interchangeable", expanded=False):
+    subs = get_substitutions()
+    hh_subs = [s for s in subs if s.get("household_id") == hh_id]
+
+    with st.form(f"add_sub_{st.session_state.add_sub_n}"):
+        col_a, col_b = st.columns(2)
+        with col_a:
+            sub_a = st.text_input("Ingredient A", placeholder="e.g. EVOO")
+        with col_b:
+            sub_b = st.text_input("Ingredient B", placeholder="e.g. Olive Oil")
+        if st.form_submit_button("Add Pair"):
+            if sub_a and sub_b:
                 try:
-                    sb.table("ingredient_aliases").insert({"alias": alias_name.strip(), "ingredient_type_id": type_id}).execute()
-                    get_all_types.clear()
-                    st.success(f"'{alias_name}' will now be recognized as **{canonical.title()}**.")
+                    sb.table("ingredient_substitutions").insert({
+                        "household_id": hh_id,
+                        "ingredient_a": sub_a.strip(),
+                        "ingredient_b": sub_b.strip(),
+                    }).execute()
+                    get_substitutions.clear()
+                    st.session_state.add_sub_n += 1
+                    st.rerun()
                 except Exception:
-                    st.info(f"'{alias_name}' is already mapped.")
+                    st.info("That pair already exists.")
+
+    if hh_subs:
+        for pair in hh_subs:
+            c1, c2 = st.columns([5, 1])
+            with c1:
+                st.write(f"{pair['ingredient_a']} ↔ {pair['ingredient_b']}")
+            with c2:
+                if st.button("🗑️", key=f"del_sub_{pair['id']}"):
+                    sb.table("ingredient_substitutions").delete().eq("id", pair["id"]).execute()
+                    get_substitutions.clear()
+                    st.rerun()
+    else:
+        st.caption("No substitutions yet. Add pairs above.")
 
 st.markdown("---")
 
@@ -125,44 +150,34 @@ st.subheader("Current Inventory")
 
 items = (
     sb.table("pantry_items")
-    .select("id, specific_name, quantity, unit, ingredient_types(name, category)")
+    .select("id, specific_name, quantity, unit")
     .eq("household_id", hh_id)
-    .order("ingredient_types(category)")
+    .order("specific_name")
     .execute()
 ).data
 
 if not items:
     st.info("Your pantry is empty. Add items above.")
 else:
-    # Group by category
-    from collections import defaultdict
-    by_category = defaultdict(list)
     for item in items:
-        cat = item.get("ingredient_types", {}).get("category", "Other") if item.get("ingredient_types") else "Uncategorized"
-        by_category[cat].append(item)
-
-    for category, cat_items in sorted(by_category.items()):
-        st.markdown(f"**{category}**")
-        for item in cat_items:
-            col1, col2, col3, col4 = st.columns([4, 1, 1, 1])
-            with col1:
-                st.write(item["specific_name"])
-            with col2:
-                st.write(f"{item['quantity']} {item['unit']}")
-            with col3:
-                new_qty = st.number_input(
-                    "Adj",
-                    min_value=0.0,
-                    value=float(item["quantity"]),
-                    step=0.5,
-                    key=f"qty_{item['id']}",
-                    label_visibility="collapsed"
-                )
-                if new_qty != item["quantity"]:
-                    sb.table("pantry_items").update({"quantity": new_qty}).eq("id", item["id"]).execute()
-                    st.rerun()
-            with col4:
-                if st.button("🗑️", key=f"del_{item['id']}"):
-                    sb.table("pantry_items").delete().eq("id", item["id"]).execute()
-                    st.rerun()
-        st.markdown("")
+        col1, col2, col3, col4 = st.columns([4, 1, 1, 1])
+        with col1:
+            st.write(item["specific_name"])
+        with col2:
+            st.write(f"{item['quantity']} {item['unit']}")
+        with col3:
+            new_qty = st.number_input(
+                "Adj",
+                min_value=0.0,
+                value=float(item["quantity"]),
+                step=0.5,
+                key=f"qty_{item['id']}",
+                label_visibility="collapsed",
+            )
+            if new_qty != item["quantity"]:
+                sb.table("pantry_items").update({"quantity": new_qty}).eq("id", item["id"]).execute()
+                st.rerun()
+        with col4:
+            if st.button("🗑️", key=f"del_{item['id']}"):
+                sb.table("pantry_items").delete().eq("id", item["id"]).execute()
+                st.rerun()

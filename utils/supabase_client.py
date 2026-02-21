@@ -1,5 +1,7 @@
 import os
+import json
 import streamlit as st
+import streamlit.components.v1 as _components
 from supabase import create_client, Client
 from dotenv import load_dotenv
 
@@ -182,3 +184,31 @@ def join_household(invite_code: str) -> bool:
     except Exception as e:
         st.error(f"Could not join household: {e}")
         return False
+
+
+# ── Session persistence via localStorage ──────────────────────
+
+_LS_KEY = "sp_session"
+
+
+def persist_auth():
+    """
+    Saves the current session's tokens to localStorage so the session survives
+    browser refreshes and Streamlit restarts. Call this on every authenticated page.
+    """
+    session = get_session()
+    if not session:
+        return
+    data = json.dumps({"at": session.access_token, "rt": session.refresh_token})
+    _components.html(
+        f"<script>try{{window.parent.localStorage.setItem({json.dumps(_LS_KEY)},{json.dumps(data)})}}catch(e){{}}</script>",
+        height=0,
+    )
+
+
+def clear_persisted_auth():
+    """Removes saved tokens from localStorage. Call on sign-out."""
+    _components.html(
+        f"<script>try{{window.parent.localStorage.removeItem({json.dumps(_LS_KEY)})}}catch(e){{}}</script>",
+        height=0,
+    )
